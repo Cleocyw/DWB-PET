@@ -548,6 +548,12 @@ def upload_image(file_name):
     p = P['data']
 
     P1= torch.from_numpy(p)
+    shape = P1.shape
+    height = shape[0]
+    width = shape[1]
+    volume = shape[2]
+    time = shape[3]
+    
     noisyP = P1 # has 14 temporal frames
     Pgt = P1.unsqueeze(0)
     Pgt = Pgt.unsqueeze(0)# shape (1,1,256,256,400,14)
@@ -559,9 +565,9 @@ def upload_image(file_name):
     Pmean = P.unsqueeze(0) #shape will be (1,1,256,256,400)
 
     #each temporal frame+gaussian noise
-    g_noise = torch.normal(0,5,(256,256,400,14)) #create a gaussian with mean 0, sigma 5
+    g_noise = torch.normal(0,5,(height,width,volume,time)) #create a gaussian with mean 0, sigma 5
     noisyP=noisyP + g_noise  
-    for i in range(14):
+    for i in range(time):
         blurry_P = (noisyP[:,:,:,i]-noisyP[:,:,:,i].mean())/(noisyP[:,:,:,i].std()) #normalize the blurry image
         noisyP[:,:,:,i] = blurry_P
 
@@ -569,7 +575,8 @@ def upload_image(file_name):
     blurry_P = blurry_P.unsqueeze(0)# shape (1,1,256,256,400,14)
     
     
-    return Pmean,blurry_P,Pgt
+    return height,width,volume,time,Pmean,blurry_P,Pgt
+    
     
 
 
@@ -675,14 +682,14 @@ import sys
 
 if len(sys.argv)>1:
     file_name=sys.argv[1]
+folder = '../../SAN/inm/DWB-PET/raw_mat_files/'
+file_name = folder+file_name
 
-Pmean,blurry_P,Pgt = upload_image(file_name)
+height,width,volume,time,Pmean,blurry_P,Pgt = upload_image(file_name)
 Pmean53 = Pmean[:,:,:,:,100:153] #take a trunk of 53
 blurry53 = blurry_P[:,:,:,:,100:153,:]
 Pgt53 = Pgt[:,:,:,:,100:153,:]
-uniform_noise = torch.randn(1,1,256,256,53)
-
-
+uniform_noise = torch.randn(1,1,height,width,53)
 
 
 
@@ -700,12 +707,10 @@ input_image3 = blurry53
 # In[27]:
 
 
-folder1 = file_name[0:3]+'_noise/'
-folder2 = file_name[0:3]+'_mean_frame/'
-folder3 = file_name[0:3]+'_blurryImage/'
+folder1 = file_name[-7:-4]+'_noise/'
+folder2 = file_name[-7:-4]+'_mean_frame/'
+folder3 = file_name[-7:-4]+'_blurryImage/'
 
-
-# In[43]:
 
 
 os.makedirs(folder1)
@@ -725,7 +730,7 @@ num_epochs = 1500
 loss_list = []
 cc_list = []
 psnr_list = []
-for i in range(14): #time = 14
+for i in range(time): #time = 14
     model = UNet(stride_pooling = True,
                  chs = [1,16,32,64,128],
                  concatenate= False,
@@ -777,7 +782,7 @@ for i in range(14): #time = 14
 loss_list = []
 cc_list = []
 psnr_list = []
-for i in range(14): #time = 14
+for i in range(time): #time = 14
     model = UNet(stride_pooling = True,
                  chs = [1,16,32,64,128],
                  concatenate= False,
@@ -830,7 +835,7 @@ for i in range(14): #time = 14
 loss_list = []
 cc_list = []
 psnr_list = []
-for i in range(14): #time = 14
+for i in range(time): #time = 14
     model = UNet(stride_pooling = True,
                  chs = [1,16,32,64,128],
                  concatenate= False,
