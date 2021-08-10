@@ -1,4 +1,6 @@
-
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import os
 import numpy as np
 import random
@@ -14,7 +16,7 @@ from torchvision import datasets
 from scipy.io import loadmat
 import pathlib
 import math
-import matplotlib.pyplot as plt
+
 import torch.nn.functional as F
 from skimage.measure import compare_psnr
 
@@ -636,7 +638,7 @@ def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoc
     
         optimizer.zero_grad()
         output = model(x_train)
-        output_img = output.detach().numpy()
+        output_img = output.detach().cpu().numpy()
         
         loss = criterion(output,label)
     #compute gradient
@@ -712,10 +714,12 @@ folder2 = file_name[-7:-4]+'_mean_frame/'
 folder3 = file_name[-7:-4]+'_blurryImage/'
 
 
-
-os.makedirs(folder1)
-os.makedirs(folder2)
-os.makedirs(folder3)
+if not os.path.exists(folder1):
+    os.makedirs(folder1)
+if not os.path.exists(folder2):
+    os.makedirs(folder2)
+if not os.path.exists(folder3):
+    os.makedirs(folder3)
 
 
 # # iterate the training
