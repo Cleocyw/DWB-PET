@@ -693,7 +693,6 @@ height,width,volume,time,label,mean_frame,blurry,mean_list,std_list = make_input
     
 
 uniform_noise = torch.randn(1,1,height,width,53,time)
-
 model = UNet(stride_pooling = True,
                  chs = [1,16,32,64,128],
                  concatenate= False,
