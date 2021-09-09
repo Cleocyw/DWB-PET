@@ -1,4 +1,5 @@
 import matplotlib
+from numpy.core.fromnumeric import mean
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
@@ -8,17 +9,14 @@ import torch
 import glob
 import torch.nn as nn
 import torchvision
-from torchvision.transforms import transforms
-from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torch.autograd import Variable
-from torchvision import datasets
 from scipy.io import loadmat
-import pathlib
+import copy
 import math
-
 import torch.nn.functional as F
 from skimage.measure import compare_psnr
+from scipy.ndimage import gaussian_filter
 
 
 
@@ -380,9 +378,6 @@ class last_block(nn.Module):
         return x
 
 
-# In[36]:
-
-
 class UNet(nn.Module):
     """
     it combines DownBlock + Latent + UpBlock + the final conv_layer block.
@@ -530,78 +525,104 @@ class UNet(nn.Module):
             
         return x
                 
-            
-
+        
 
 # # upload image and noise
 
 
-def upload_image(file_name):
+def make_input1(file_name):
     """
     This function uploads and normalize the data by subtract mean and then devided by std
     input:
         file_name is a str, e.g. 'xcat.mat'
+
     returns:
-        Pmean: the mean of temporal frames. Shape(1,1,256,256,400)
-        blurry_P : each temporal frames has been added Gaussian noise with sigma = 5. Shape(1,1,256,256,400,14)
-        Pgt :ground-truth / original image. Shape(1,1,256,256,400,14), which is not normalized.
+        mean_frame: the mean of temporal frames. Have been normalized. Shape(1,1,256,256,409,14). 
+                    Here has 14 frames because each mean frame need to be normalized with different mean/std.
+        Plabel: original images after normalization. Shape(1,1,256,256,409,14).
+        mean_list : a list of the values of mean at 14 time frames of original data.
+        std_list : a list of the values of std at 14 time frames of original data.
     """
     P = loadmat(file_name)
     p = P['data']
 
     P1= torch.from_numpy(p)
+    P2=copy.deepcopy(P1)
     shape = P1.shape
     height = shape[0]
     width = shape[1]
-    volume = shape[2]
+    volume = shape[2] 
     time = shape[3]
     
-    noisyP = P1 # has 14 temporal frames
-    Pgt = P1.unsqueeze(0)
-    Pgt = Pgt.unsqueeze(0)# shape (1,1,256,256,400,14)
+    #ground truth image that no normalization
+
+    mean_list=[]
+    std_list=[]
+    #create label image
+    for i in range(time):       # t is the time
+        m=P2[:,:,:,i].mean()   #m is the mean of label image at time t
+        std = P2[:,:,:,i].std()
+        mean_list.append(m)
+        std_list.append(std)
+        Pnormal = (P2[:,:,:,i]-m)/std  #normalize
+        P2[:,:,:,i] = Pnormal
+        
+    Plabel = P2.unsqueeze(0)
+    Plabel = Plabel.unsqueeze(0)# shape (1,1,256,256,409,14)
+    
+    
     
     #mean temporal frame
-    P1 = torch.mean(P1,dim=3) 
-    P = (P1-P1.mean())/(P1.std()) #normalization
-    P = P.unsqueeze(0)
-    Pmean = P.unsqueeze(0) #shape will be (1,1,256,256,400)
+    P3=copy.deepcopy(P1)
+    mean_frame = torch.empty(shape)
+    avg_frame = torch.mean(P3,dim=3)
+    for i in range(time): 
+        avg = (avg_frame-mean_list[i])/std_list[i] #normalization     
+        mean_frame[:,:,:,i] = avg
+    mean_frame = mean_frame.unsqueeze(0)
+    mean_frame = mean_frame.unsqueeze(0)   
 
-    #each temporal frame+gaussian noise
-    g_noise = torch.normal(0,5,(height,width,volume,time)) #create a gaussian with mean 0, sigma 5
-    noisyP=noisyP + g_noise  
+    return height,width,volume,time,Plabel,mean_frame,mean_list,std_list
+
+def make_input2(file_name):    #create gaussian smoothing image
+    """
+    return:
+    blurry : each temporal frames has been added Gaussian noise with sigma = 5. Shape(1,1,256,256,409,14)
+    """
+    P = loadmat(file_name)
+    p = P['data']    
+    P1 = torch.from_numpy(p) # has 14 temporal frames
+
+
     for i in range(time):
-        blurry_P = (noisyP[:,:,:,i]-noisyP[:,:,:,i].mean())/(noisyP[:,:,:,i].std()) #normalize the blurry image
-        noisyP[:,:,:,i] = blurry_P
+        blurry_P = gaussian_filter(p[:,:,:,i],5) #gausian smoothing, sigma=5 ; p is numpy
+        P1[:,:,:,i] = torch.from_numpy(blurry_P)
+        P1[:,:,:,i] = (P1[:,:,:,i]-mean_list[i])/std_list[i]#normalize
 
-    blurry_P = noisyP.unsqueeze(0)
-    blurry_P = blurry_P.unsqueeze(0)# shape (1,1,256,256,400,14)
-    
-    
-    return height,width,volume,time,Pmean,blurry_P,Pgt
-    
+    blurry = P1.unsqueeze(0)
+    blurry = blurry.unsqueeze(0)# shape (1,1,256,256,400,14)
+    return blurry
     
 
 
-# # save the output images
-# 
+#save the output images/numpy
+
+def save_npy(path,x):
+    np.save(path,x)
 
 
-
-def save_output_img(output_img,epoch,i,folder,train_loss,psnr,cc): # i is for telling which time (from 1 to 14); 
-                                                                   #folder has three types because there are three kids of input_image
+def save_output_img(recover_img,epoch,i,train_loss,psnr,cc): # i is for telling which time (from 1 to 14); 
+                                                                  
     fig = plt.figure()
     ax = fig.add_subplot(111)   
-    plot = plt.imshow(output_img[0,0,:,:,36])
-    #plt.clim(0,0.9*label_max)#have same color range
-    plt.title('Time:{},Epoch: {}, Loss: {:.5f}, PSNR: {:.5f},CC:{:.5f}'.format(i+1,epoch+1, train_loss,psnr,cc))
+    plot = plt.imshow(recover_img[0,0,:,:,20])
+    plt.title('Time:{},Epoch: {}, Loss: {:.4f}, PSNR: {:.4f},CC:{:.4f}'.format(i+1,epoch+1, train_loss,psnr,cc))
 
-    plt.savefig(folder+'output_image{}-{}.png'.format(i+1,epoch+1)) #e.g. output_image1-1000 means the 1000th image at time 1
+    plt.savefig(folder3+'output_image{}-{}.png'.format(i+1,epoch+1)) #e.g. output_image1-1000 means the 1000th image at time 1
     plt.close(fig)#not display the image
 
 
-# # train function
-
-
+#  train function
 
 def optim(optimizer:str = 'Adam'):
     if optimizer == 'Adam':
@@ -614,7 +635,7 @@ def loss(criterion:str = 'MSE'):
         return nn.MSELoss()
     
     
-def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i,folder):
+def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i):
     optimizer = optim(optimizer_name)
     criterion = loss(criterion_name)
 
@@ -663,76 +684,83 @@ def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoc
         
 
         
-        print('Time:{} \tEpoch: {} \tTraining Loss: {:.6f} \tPSNR: {:.6f} \tCC:{:6f}'.format(i,epoch, train_loss,psnr,cc))
+        #print('Time:{} \tEpoch: {} \tTraining Loss: {:.6f} \tPSNR: {:.6f} \tCC:{:6f}'.format(i,epoch, train_loss,psnr,cc))
         
         
         if (epoch+1) %30 == 0:  #this only display the output of tevery 30 iteration
-            
-            save_output_img(output_img,epoch,i,folder,train_loss,psnr,cc)
+
+            #recover the output to be in the same scale as gt image: multiply by std and add mean
+            recover_img = output_img*std_list[i].numpy()+mean_list[i].numpy()
+            path1 = folder2+'output{}-{}'.format(i+1,epoch+1)
+            save_npy(path1,recover_img[0,0,:,:,20])
+            save_output_img(recover_img,epoch,i,train_loss,psnr,cc)
             
     
     return train(epoch)
     
- 
 
-
-# #  training process
-
-
+#  training process
 
 import sys
 
 if len(sys.argv)>1:
     file_name=sys.argv[1]
+    input_type = sys.argv[2]
 folder = '../../SAN/inm/DWB-PET/raw_mat_files/'
 file_name = folder+file_name
 
-height,width,volume,time,Pmean,blurry_P,Pgt = upload_image(file_name)
-Pmean53 = Pmean[:,:,:,:,250:303] #take a trunk of 53
-blurry53 = blurry_P[:,:,:,:,250:303,:]
-Pgt53 = Pgt[:,:,:,:,250:303,:]
-uniform_noise = torch.randn(1,1,height,width,53)
+height,width,volume,time,Plabel,mean_frame,mean_list,std_list = make_input1(file_name)
+blurry = make_input2(file_name)
+uniform_noise = torch.randn(1,1,height,width,53,time)
 
+#set input image and folders
+if input_type == 'mean':
+    input_image = mean_frame[:,:,:,:,230:283,:] #this trunk has 53 slices passing lung and livers
+    folder1 = file_name[-7:-4]+'_mean_frame/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
 
+elif input_type == 'noise':
+    input_image = uniform_noise
+    folder1 = file_name[-7:-4]+'_noise/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
+
+elif input_type == 'blurry':
+    input_image = blurry[:,:,:,:,230:283,:]
+    folder1 = file_name[-7:-4]+'_blurryImage/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
+if not os.path.exists(folder1):
+    os.makedirs(folder1)
+    if not os.path.exists(folder2):
+        os.makedirs(folder2)
+    if not os.path.exists(folder3):
+        os.makedirs(folder3)
+    if not os.path.exists(folder4):
+        os.makedirs(folder4)
+
+#set label image
+label_image = Plabel[:,:,:,:,230:283,:] #has normalize
 
 
 criterion_name = 'MSE'
 optimizer_name = 'Adam'
 
-input_image2 = uniform_noise
-input_image1 = Pmean53 #Pmean
-input_image3 = blurry53
-
-
-# # create a folder for all the output images
-
-# In[27]:
-
-
-folder2 = file_name[-7:-4]+'_noise/'
-folder1 = file_name[-7:-4]+'_mean_frame/'
-folder3 = file_name[-7:-4]+'_blurryImage/'
-
-
-if not os.path.exists(folder1):
-    os.makedirs(folder1)
-if not os.path.exists(folder2):
-    os.makedirs(folder2)
-if not os.path.exists(folder3):
-    os.makedirs(folder3)
-
 
 # # iterate the training
 
-# In[44]:
 
 
 num_epochs = 1200
+#time_index = [0,time//2 -1,time-1] #when choose 3 temporal frames
+time_index = range(time)
 
 
-#when input is uniform noise
-
-for i in range(time): #time = 14
+for i in time_index: 
     loss_list = []
     cc_list = []
     psnr_list = []
@@ -750,124 +778,16 @@ for i in range(time): #time = 14
                  dim= 3,
                  up_sample= 'nearest')
 
-    label_image = Pgt53[:,:,:,:,:,i]
+    label_img = label_image[:,:,:,:,:,i] #has normalize
+    label_npy = label_img[0,0,:,:,20]*std_list[i] + mean_list[i] #re-normalize input; 20 is the slice for heart
+    npy_label = save_npy(folder2+'label-{}'.format(i+1), label_npy.numpy())
     
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,20],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i+1))
-    plt.savefig(folder1+'label-time:{}.png'.format(i+1))
-    plt.close(fig_star)#not display the image
-    
+    input_npy = input_image[0,0,:,:,20,i]*std_list[i] + mean_list[i] #re-normalize input
+    npy_input = save_npy(folder2+'input-{}'.format(i+1), input_npy.numpy())
+   
+
     for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image1,label_image,epoch,i,folder1)
-        
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Time {}-Training Loss'.format(i+1))
-    plt.savefig(folder1+'loss-{}.png'.format(i+1))
-    plt.close(fig1)#not display the image
-    
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('Time {}-PSNR'.format(i+1))
-    plt.savefig(folder1+'PSNR-{}.png'.format(i+1))
-    plt.close(fig2)
-
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Time {}-Pearson correlation coefficient'.format(i+1))
-    plt.savefig(folder1+'cc-{}.png'.format(i+1))
-    plt.close(fig3)
-
-#when input is the mean temporal frame
-
-for i in range(time): #time = 14
-    loss_list = []
-    cc_list = []
-    psnr_list = []
-    model = UNet(stride_pooling = True,
-                 chs = [1,16,32,64,128],
-                 concatenate= False,
-                 add = True,
-                 Crop=True,
-                 pooling = "max",                 
-                 kernel_size = 3,
-                 stride = 1,
-                 padding = 1,
-                 activation= 'leaky',
-                 normalization = "BN",
-                 dim= 3,
-                 up_sample= 'nearest')
-
-    label_image = Pgt53[:,:,:,:,:,i]
-    
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,20],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i+1))
-    plt.savefig(folder2+'label-{}.png'.format(i+1))
-    plt.close(fig_star)#not display the image
-    
-    for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image2,label_image,epoch,i,folder2)
-        
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Time {}-Training Loss'.format(i+1))
-    plt.savefig(folder2+'loss-{}.png'.format(i+1))
-    plt.close(fig1)#not display the image
-    
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('Time {}-PSNR'.format(i+1))
-    plt.savefig(folder2+'PSNR-{}.png'.format(i+1))
-    plt.close(fig2)
-
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Time {}-Pearson correlation coefficient'.format(i+1))
-    plt.savefig(folder3+'cc-{}.png'.format(i+1))
-    plt.close(fig3)
-    
-    
-#when input is the blurry image
-
-for i in range(time): #time = 14
-    loss_list = []
-    cc_list = []
-    psnr_list = []
-    model = UNet(stride_pooling = True,
-                 chs = [1,16,32,64,128],
-                 concatenate= False,
-                 add = True,
-                 Crop=True,
-                 pooling = "max",                 
-                 kernel_size = 3,
-                 stride = 1,
-                 padding = 1,
-                 activation= 'leaky',
-                 normalization = "BN",
-                 dim= 3,
-                 up_sample= 'nearest')
-    label_image = Pgt53[:,:,:,:,:,i]
-    input_image = blurry53[:,:,:,:,:,i]
-    
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,20],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i+1))
-    plt.savefig(folder3+'label-{}.png'.format(i+1))
-    plt.close(fig_star)#not display the image
-    
-    for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i,folder3)
+        train_setup(model,criterion_name,optimizer_name,input_image[:,:,:,:,:,i],label_img,epoch,i)
         
     fig1 = plt.figure()
     ax1 = fig1.add_subplot(111)  
@@ -889,6 +809,4 @@ for i in range(time): #time = 14
     plt.title('Time {}-Pearson correlation coefficient'.format(i+1))
     plt.savefig(folder3+'cc-{}.png'.format(i+1))
     plt.close(fig3)
-    
 
- 

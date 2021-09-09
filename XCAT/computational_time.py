@@ -4,28 +4,28 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 import random
+import time
 import torch
 import glob
 import torch.nn as nn
 import torchvision
-from torchvision.transforms import transforms
-from torch.utils.data import DataLoader
+#from torchvision.transforms import transforms
+#from torch.utils.data import DataLoader
 from torch.optim import Adam
 from torch.autograd import Variable
-from torchvision import datasets
+#from torchvision import datasets
 from scipy.io import loadmat
-import pathlib
+#import pathlib
 import math
-
+import copy
 import torch.nn.functional as F
 from skimage.measure import compare_psnr
+from scipy.ndimage import gaussian_filter
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-
 
 def activation_layer(activation:str):
 
@@ -198,8 +198,6 @@ class DownBlock(nn.Module):
                                                        
         return x,connect_layer
     
-    
-
 class Latent(nn.Module):
     """
     Latent, also called bottleneck, represents the bottom middle part of the UNet.
@@ -243,9 +241,7 @@ class Latent(nn.Module):
         x = self.activation_layer(x)
         
         return x
-        
-
-        
+               
 class UpBlock(nn.Module):
     """
     it corresponds to "red arrow+blue arrow+ blue arrow", i.e.
@@ -334,8 +330,6 @@ class UpBlock(nn.Module):
 
         return x
     
-        
-
 class last_block(nn.Module):
     """
     it's the last block of layers after the UpBlock to make channel 16 into channel 1.
@@ -378,10 +372,6 @@ class last_block(nn.Module):
         #x = nn.Sigmoid()(x)
         #x = nn.Linear(256,256)(x)
         return x
-
-
-# In[36]:
-
 
 class UNet(nn.Module):
     """
@@ -530,77 +520,90 @@ class UNet(nn.Module):
             
         return x
                 
-            
+def create_noisy_xcat(file):
+    data1 = loadmat(file)
+    data = data1['data']
+    non_noisy_xcat = torch.from_numpy(data) #this is tensor of shape (256,256,400,14)
+    factor = 80
+    noisy_xcat = torch.poisson(non_noisy_xcat/factor)*factor
+    
+    return non_noisy_xcat, noisy_xcat
+    
 
-
-# # upload image and noise
-
-
-def upload_image(file_name):
+def make_input_xcat(non_noisy_xcat,noisy_xcat):
     """
     This function uploads and normalize the data by subtract mean and then devided by std
     input:
-        file_name is a str, e.g. 'xcat.mat'
-    returns:
-        Pmean: the mean of temporal frames. Shape(1,1,256,256,400)
-        blurry_P : each temporal frames has been added Gaussian noise with sigma = 5. Shape(1,1,256,256,400,14)
-        Pgt :ground-truth / original image. Shape(1,1,256,256,400,14), which is not normalized.
-    """
-    P = loadmat(file_name)
-    p = P['data']
+        tensor, 4 dimensions:(256,256,400,14)
 
-    P1= torch.from_numpy(p)
-    shape = P1.shape
+    returns:
+        label: normalized noisy xcat. shape(1,1,256,256,256,400,14)
+        the lsit of mean of temporal frames. has 14 items and each item is of shape(1,1,256,256,400)
+        blurry_P : each temporal frames has been added Gaussian noise with sigma = 5. Shape(1,1,256,256,400,14)
+    """
+    nnx = non_noisy_xcat
+    nx = noisy_xcat
+    shape = nnx.shape
     height = shape[0]
     width = shape[1]
-    volume = shape[2]
-    time = shape[3]
+    volume = shape[2] 
+    timerange = shape[3]    
+    #start normalization based on noisy_xcat
+    nx_copy = copy.deepcopy(nx)
+
+    mean_list=[] #save mean and std for each time's noisy xcat
+    std_list=[]
+    #create label image- label image is the normalized noisy xat
+    for i in range(timerange): 
+        m = nx_copy[:,:,:,i].mean()   #m is the mean of label image at time t
+        std = nx_copy[:,:,:,i].std()
+        mean_list.append(m)
+        std_list.append(std)
+        nx_copy[:,:,:,i] = (nx_copy[:,:,:,i]-m)/std  #normalize
+     
+    label = nx_copy.unsqueeze(0)
+    label = label.unsqueeze(0)# shape (1,1,256,256,400,14)
+       
+        #mean temporal frame
+    mean_frame = torch.empty(shape)
+    avg_frame = torch.mean(nx,dim=3)
+    for i in range(timerange): 
+        avg = (avg_frame-mean_list[i])/std_list[i] #normalization     
+        mean_frame[:,:,:,i] = avg
+    mean_frame = mean_frame.unsqueeze(0)
+    mean_frame = mean_frame.unsqueeze(0)   
     
-    noisyP = P1 # has 14 temporal frames
-    Pgt = P1.unsqueeze(0)
-    Pgt = Pgt.unsqueeze(0)# shape (1,1,256,256,400,14)
-    
-    #mean temporal frame
-    P1 = torch.mean(P1,dim=3) 
-    P = (P1-P1.mean())/(P1.std()) #normalization
-    P = P.unsqueeze(0)
-    Pmean = P.unsqueeze(0) #shape will be (1,1,256,256,400)
+    #gaussian fillter
+    nx_copy2 = copy.deepcopy(nx)
+    for i in range(timerange):
+        blurry1 = gaussian_filter(nx_copy2[:,:,:,i].numpy(),5) #gausian smoothing, sigma=5 ; blurry1 is numpy form
+        blurry1 = torch.from_numpy(blurry1) #blurry1 is tensor, 4d
+        nx_copy2[:,:,:,i] = (blurry1-mean_list[i])/std_list[i]#normalize
 
-    #each temporal frame+gaussian noise
-    g_noise = torch.normal(0,5,(height,width,volume,time)) #create a gaussian with mean 0, sigma 5
-    noisyP=noisyP + g_noise  
-    for i in range(time):
-        blurry_P = (noisyP[:,:,:,i]-noisyP[:,:,:,i].mean())/(noisyP[:,:,:,i].std()) #normalize the blurry image
-        noisyP[:,:,:,i] = blurry_P
-
-    blurry_P = noisyP.unsqueeze(0)
-    blurry_P = blurry_P.unsqueeze(0)# shape (1,1,256,256,400,14)
-    
-    
-    return height,width,volume,time,Pmean,blurry_P,Pgt
-    
+    blurry = nx_copy2.unsqueeze(0)
+    blurry = blurry.unsqueeze(0)# shape (1,1,256,256,400,14)
     
 
 
-# # save the output images
-# 
 
+    return height,width,volume,timerange,label,mean_frame,blurry,mean_list,std_list
 
-
-def save_output_img(output_img,epoch,i,folder,train_loss,psnr,cc): # i is for telling which time (from 1 to 14); 
+# # save the output images and npy
+def save_output_img(img,epoch,i,train_loss,psnr,cc): # i is for telling which time (from 1 to 14); 
                                                                    #folder has three types because there are three kids of input_image
     fig = plt.figure()
     ax = fig.add_subplot(111)   
-    plot = plt.imshow(output_img[0,0,:,:,25])
-    plt.clim(0,1)#have same color range
-    plt.title('Time:{},Epoch: {}, Loss: {:.5f}, PSNR: {:.5f},CC:{:.5f}'.format(i+1,epoch+1, train_loss,psnr,cc))
-
-    plt.savefig(folder+'output_image{}-{}.png'.format(i+1,epoch+1)) #e.g. output_image1-1000 means the 1000th image at time 1
+    plot = plt.imshow(img)
+    #plt.clim(0,0.9*label_max)#have same color range
+    plt.title('Time:{},Epoch: {}, Loss: {:.4f}, PSNR: {:.4f},CC:{:.4f}'.format(i+1,epoch+1, train_loss,psnr,cc))
+    plt.savefig(folder3+'output_image{}-{}.png'.format(i+1,epoch+1)) #e.g. output_image1-1000 means the 1000th image at time 1
     plt.close(fig)#not display the image
+
+def save_npy(path,x):
+    np.save(path,x)
 
 
 # # train function
-
 
 
 def optim(optimizer:str = 'Adam'):
@@ -614,7 +617,7 @@ def loss(criterion:str = 'MSE'):
         return nn.MSELoss()
     
     
-def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i,folder):
+def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i):
     optimizer = optim(optimizer_name)
     criterion = loss(criterion_name)
 
@@ -650,242 +653,96 @@ def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoc
     
         train_loss = loss.item()
         
-        #correlation coeeficient
-        cm = np.corrcoef(output_img[0,0,:,:,:].flat,label_image[0,0,:,:,:].numpy().flat)#16 is because it's the middle slice from volume=53
-        cc = cm[0,1]
-        
-        #psnr
-        psnr = compare_psnr(label_image.numpy(), output_img,1)        
-        
-        loss_list.append(train_loss)
-        cc_list.append(cc)
-        psnr_list.append(psnr)
-        
 
         
-        print('Time:{} \tEpoch: {} \tTraining Loss: {:.6f} \tPSNR: {:.6f} \tCC:{:6f}'.format(i,epoch, train_loss,psnr,cc))
+        #psnr : need them in same range so rescale first
+        # rescale_output = output_img[0,0,:,:,:]*std_list[i].numpy()+mean_list[i].numpy()
+
         
+        #print('Epoch: {} \tTraining Loss: {:.6f} \tPSNR: {:.6f} \tCC:{:6f}'.format(epoch, train_loss,psnr,cc))
         
-        if (epoch+1) %1 == 0:  #this only display the output of tevery 100 iteration
-            
-            save_output_img(output_img,epoch,i,folder,train_loss,psnr,cc)
-            
-    
+
+
     return train(epoch)
     
- 
-
 
 # #  training process
-
-
-
 import sys
-
 if len(sys.argv)>1:
     file_name=sys.argv[1]
+    input_type = sys.argv[2]
 folder = '../../SAN/inm/DWB-PET/raw_mat_files/'
 file_name = folder+file_name
 
-height,width,volume,time,Pmean,blurry_P,Pgt = upload_image(file_name)
-Pmean53 = Pmean[:,:,:,:,100:153] #take a trunk of 53
-blurry53 = blurry_P[:,:,:,:,100:153,:]
-Pgt53 = Pgt[:,:,:,:,100:153,:]
-uniform_noise = torch.randn(1,1,height,width,53)
+non_noisy_xcat, noisy_xcat = create_noisy_xcat(file_name)
+height,width,volume,timerange,label,mean_frame,blurry,mean_list,std_list = make_input_xcat(non_noisy_xcat,noisy_xcat)
+    
 
+uniform_noise = torch.randn(1,1,height,width,53,timerange)
 
-
-
+model = UNet(stride_pooling = True,
+                 chs = [1,16,32,64,128],
+                 concatenate= False,
+                 add = True,
+                 Crop=True,
+                 pooling = "max",
+                 
+                 kernel_size = 3,
+                 stride = 1,
+                 padding = 1,
+                 activation= 'leaky',
+                 normalization = "BN",
+                 dim= 3,
+                 up_sample= 'nearest')
 criterion_name = 'MSE'
 optimizer_name = 'Adam'
 
-input_image1 = uniform_noise
-input_image2 = Pmean53 #Pmean
-input_image3 = blurry53
+#build folders; input should be of size (1,1,256,256,53,14)
+nx = noisy_xcat[:,:,90:143,:] #this is no normalization. 4D. [96,128,92,:] is the location of tumor
+label_image = label[:,:,:,:,90:143,:]# this has been normalized. 6D
+if input_type == 'mean':
+    input_image = mean_frame[:,:,:,:,90:143,:] #this trunk has 53 slices passing lung and livers
+    folder1 = file_name[-7:-4]+'_mean_frame/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
 
+elif input_type == 'noise':
+    input_image = uniform_noise
+    folder1 = file_name[-7:-4]+'_noise/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
 
-# # create a folder for all the output images
-
-# In[27]:
-
-
-folder1 = file_name[-7:-4]+'_noise/'
-folder2 = file_name[-7:-4]+'_mean_frame/'
-folder3 = file_name[-7:-4]+'_blurryImage/'
-
-
+elif input_type == 'blurry':
+    input_image = blurry[:,:,:,:,90:143,:]
+    folder1 = file_name[-7:-4]+'_blurryImage/'
+    folder2 = folder1+"npy/"
+    folder3 = folder1+"figures/"
+    folder4 = folder1+'TAC/'
 if not os.path.exists(folder1):
     os.makedirs(folder1)
-if not os.path.exists(folder2):
-    os.makedirs(folder2)
-if not os.path.exists(folder3):
-    os.makedirs(folder3)
+    if not os.path.exists(folder2):
+        os.makedirs(folder2)
+    if not os.path.exists(folder3):
+        os.makedirs(folder3)
+    if not os.path.exists(folder4):
+        os.makedirs(folder4)
 
 
-# # iterate the training
+num_epochs = 800
 
-# In[44]:
+for i in range(1): #time = 14
 
-
-num_epochs = 1500
-
-
-#when input is uniform noise
-loss_list = []
-cc_list = []
-psnr_list = []
-for i in range(time): #time = 14
-    model = UNet(stride_pooling = True,
-                 chs = [1,16,32,64,128],
-                 concatenate= False,
-                 add = True,
-                 Crop=True,
-                 pooling = "max",                 
-                 kernel_size = 3,
-                 stride = 1,
-                 padding = 1,
-                 activation= 'leaky',
-                 normalization = "BN",
-                 dim= 3,
-                 up_sample= 'nearest')
-
-    label_image = Pgt53[:,:,:,:,:,i]
-    
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,25],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i))
-    plt.savefig(folder1+'label-{}.png'.format(i))
-    plt.close(fig_star)#not display the image
-    
+    time_start = time.clock()
     for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image1,label_image,epoch,i,folder1)
         
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Training Loss')
-    plt.savefig(folder1+'loss.png')
-    plt.close(fig1)#not display the image
-    
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('PSNR')
-    plt.savefig(folder1+'PSNR.png')
-    plt.close(fig2)
+        train_setup(model,criterion_name,optimizer_name,input_image[:,:,:,:,:,i],label_image[:,:,:,:,:,i],epoch,i)
+    time_elapsed = (time.clock() - time_start)
+    print(time_elapsed)
 
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Pearson correlation coefficient')
-    plt.savefig(folder1+'cc.png')
-    plt.close(fig3)
-
-#when input is the mean temporal frame
-loss_list = []
-cc_list = []
-psnr_list = []
-for i in range(time): #time = 14
-    model = UNet(stride_pooling = True,
-                 chs = [1,16,32,64,128],
-                 concatenate= False,
-                 add = True,
-                 Crop=True,
-                 pooling = "max",                 
-                 kernel_size = 3,
-                 stride = 1,
-                 padding = 1,
-                 activation= 'leaky',
-                 normalization = "BN",
-                 dim= 3,
-                 up_sample= 'nearest')
-
-    label_image = Pgt53[:,:,:,:,:,i]
     
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,25],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i))
-    plt.savefig(folder2+'label-{}.png'.format(i))
-    plt.close(fig_star)#not display the image
-    
-    for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image2,label_image,epoch,i,folder2)
-        
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Training Loss')
-    plt.savefig(folder2+'loss.png')
-    plt.close(fig1)#not display the image
-    
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('PSNR')
-    plt.savefig(folder2+'PSNR.png')
-    plt.close(fig2)
-
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Pearson correlation coefficient')
-    plt.savefig(folder3+'cc.png')
-    plt.close(fig3)
-    
-    
-#when input is the blurry image
-loss_list = []
-cc_list = []
-psnr_list = []
-for i in range(time): #time = 14
-    model = UNet(stride_pooling = True,
-                 chs = [1,16,32,64,128],
-                 concatenate= False,
-                 add = True,
-                 Crop=True,
-                 pooling = "max",                 
-                 kernel_size = 3,
-                 stride = 1,
-                 padding = 1,
-                 activation= 'leaky',
-                 normalization = "BN",
-                 dim= 3,
-                 up_sample= 'nearest')
-    label_image = Pgt53[:,:,:,:,:,i]
-    input_image = blurry53[:,:,:,:,:,i]
-    
-    fig_star =plt.figure()
-    ax1 = fig_star.add_subplot(111)  
-    plt.imshow(label_image[0,0,:,:,25],label='Ground truth image')
-    plt.title('Ground truth image at time {}'.format(i))
-    plt.savefig(folder3+'label-{}.png'.format(i))
-    plt.close(fig_star)#not display the image
-    
-    for epoch in range(num_epochs):
-        train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoch,i,folder3)
-        
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Training Loss')
-    plt.savefig(folder3+'loss.png')
-    plt.close(fig1)#not display the image
-    
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('PSNR')
-    plt.savefig(folder3+'PSNR.png')
-    plt.close(fig2)
-
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Pearson correlation coefficient')
-    plt.savefig(folder3+'cc.png')
-    plt.close(fig3)
     
 
- 
+    
+

@@ -520,6 +520,9 @@ class UNet(nn.Module):
         return x
                 
 def create_noisy_xcat(file):
+    """
+    generate Poisson noise XCAT label images and original non-noisy ones.
+    """
     data1 = loadmat(file)
     data = data1['data']
     non_noisy_xcat = torch.from_numpy(data) #this is tensor of shape (256,256,400,14)
@@ -589,11 +592,10 @@ def make_input_xcat(non_noisy_xcat,noisy_xcat):
 
 # # save the output images and npy
 def save_output_img(img,epoch,i,train_loss,psnr,cc): # i is for telling which time (from 1 to 14); 
-                                                                   #folder has three types because there are three kids of input_image
+                                                          
     fig = plt.figure()
-    ax = fig.add_subplot(111)   
-    plot = plt.imshow(img)
-    #plt.clim(0,0.9*label_max)#have same color range
+    fig.add_subplot(111)   
+    plt.imshow(img)
     plt.title('Time:{},Epoch: {}, Loss: {:.4f}, PSNR: {:.4f},CC:{:.4f}'.format(i+1,epoch+1, train_loss,psnr,cc))
     plt.savefig(folder3+'output_image{}-{}.png'.format(i+1,epoch+1)) #e.g. output_image1-1000 means the 1000th image at time 1
     plt.close(fig)#not display the image
@@ -602,8 +604,8 @@ def save_npy(path,x):
     np.save(path,x)
 
 
-# # train function
 
+# train function
 
 def optim(optimizer:str = 'Adam'):
     if optimizer == 'Adam':
@@ -626,7 +628,7 @@ def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoc
         criterion = criterion.cuda()
         
     def train(epoch):
-    #strat TRAIN mode
+    #start TRAIN mode
         model.train()
         train_loss = 0.0
         
@@ -648,39 +650,33 @@ def train_setup(model,criterion_name,optimizer_name,input_image,label_image,epoc
     #update parameters
         torch.nn.utils.clip_grad_norm_(model.parameters(),1)
         optimizer.step()    
-         
-    
         train_loss = loss.item()
-        
         #correlation coefficient
-        cm = np.corrcoef(output_img[0,0,:,:,5].flat,label_image[0,0,:,:,5].numpy().flat)
-        cc = cm[0,1]
+        cm1 = np.corrcoef(output_img[0,0,:,:,:].flatten(),label_image[0,0,:,:,:].numpy().flatten())
+        cc1 = cm1[0,1]
+        cm2 = np.corrcoef(output_img[0,0,:,:,:].flatten(),non_noisy_xcat[:,:,90:143,i].numpy().flatten())
+        #cm2 is the cc between output and the perfect xcat
+        cc2 = cm2[0,1]
         
-        #psnr
-        psnr = compare_psnr(label_image.numpy(), output_img,1)        
-        
+        #psnr : need them in same range so rescale first
+        scale_nnx = (non_noisy_xcat[:,:,90:143,i]-mean_list[i])/std_list[i]
+        psnr1 = compare_psnr(label_image.numpy(), output_img, 1)        
+        psnr2 = compare_psnr(scale_nnx.numpy(), output_img[0,0,:,:,:], 1)
+
         loss_list.append(train_loss)
-        cc_list.append(cc)
-        psnr_list.append(psnr)
-        
-        #print('Epoch: {} \tTraining Loss: {:.6f} \tPSNR: {:.6f} \tCC:{:6f}'.format(epoch, train_loss,psnr,cc))
+        cc_list_nx.append(cc1)
+        cc_list_nnx.append(cc2)
+        psnr_list_nx.append(psnr1)
+        psnr_list_nnx.append(psnr2)
         
         if (epoch+1) %40 == 0:  #this only display the output of every 40 iteration; output need to be recovered from normalization
-            recover_output = output_img[0,0,:,:,5]*std_list[i].numpy()+mean_list[i].numpy()
-            save_output_img(recover_output,epoch,i,train_loss,psnr,cc)
+            recover_output = output_img[0,0,:,:,2]*std_list[i].numpy()+mean_list[i].numpy()
+            save_output_img(recover_output,epoch,i,train_loss,psnr1,cc1)
             save_npy(folder2+'output:{}-{}'.format(i+1,epoch+1),recover_output)
-        if (epoch+1)%100 == 0:
-            n = (epoch+1)//100-1 
-            lung_denoised = output_img[0,0,150,130,5]*std_list[i].numpy()+mean_list[i].numpy() 
-            lung_big_list[n][i]=lung_denoised #for each 100 iteration, each time, save the denoised lung activity
-            
 
-            
-    
     return train(epoch)
     
-
-# #  training process
+# training process
 import sys
 if len(sys.argv)>1:
     file_name=sys.argv[1]
@@ -693,6 +689,7 @@ height,width,volume,time,label,mean_frame,blurry,mean_list,std_list = make_input
     
 
 uniform_noise = torch.randn(1,1,height,width,53,time)
+
 model = UNet(stride_pooling = True,
                  chs = [1,16,32,64,128],
                  concatenate= False,
@@ -711,10 +708,10 @@ criterion_name = 'MSE'
 optimizer_name = 'Adam'
 
 #build folders; input should be of size (1,1,256,256,53,14)
-nx = noisy_xcat[:,:,106:159,:] #this is no normalization. 4D
-label_image = label[:,:,:,:,106:159,:]# this has been normalized. 6D
+nx = noisy_xcat[:,:,90:143,:] #this is no normalization. 4D. [96,128,92,:] is the location of tumor
+label_image = label[:,:,:,:,90:143,:]# this has been normalized. 6D
 if input_type == 'mean':
-    input_image = mean_frame[:,:,:,:,106:159,:] #this trunk has 53 slices passing lung and livers
+    input_image = mean_frame[:,:,:,:,90:143,:] #this trunk has 53 slices passing lung and livers
     folder1 = file_name[-7:-4]+'_mean_frame/'
     folder2 = folder1+"npy/"
     folder3 = folder1+"figures/"
@@ -728,7 +725,7 @@ elif input_type == 'noise':
     folder4 = folder1+'TAC/'
 
 elif input_type == 'blurry':
-    input_image = blurry[:,:,:,:,106:159,:]
+    input_image = blurry[:,:,:,:,90:143,:]
     folder1 = file_name[-7:-4]+'_blurryImage/'
     folder2 = folder1+"npy/"
     folder3 = folder1+"figures/"
@@ -744,73 +741,33 @@ if not os.path.exists(folder1):
 
 
 num_epochs = 800
-number = num_epochs//100
-perfect_lung_list = []
-lung_list = []  #TAC
-lung_big_list = np.zeros([number,time])
 
 for i in range(time): #time = 14
     loss_list = []
-    cc_list = []
-    psnr_list = []
+    cc_list_nnx = [] #this saves cc between output and non-noisy xcat
+    cc_list_nx = [] #this saves cc between output and noisy xcat
+    psnr_list_nnx = []
+    psnr_list_nx = []
     #save real measured image (no normalization): use nx and input(after recover) image/npy
-    npy_real = save_npy(folder2+'real-{}'.format(i+1),nx[:,:,5,i].numpy())
+    npy_real = save_npy(folder2+'real-{}'.format(i+1),nx[:,:,2,i].numpy())
     fig_real =plt.figure()
     ax1 = fig_real.add_subplot(111)  
-    plt.imshow(nx[:,:,5,i],label='Real image') # 5 is the location of lung (trunk:106:159)
+    plt.imshow(nx[:,:,2,i],label='Real image') # 2 is the location of tumor (trunk:90:143)
     plt.title('Label image at time {}'.format(i+1))
     plt.savefig(folder3+'real-{}.png'.format(i+1))
     plt.close(fig_real)#not display the image
-
-    #recover_input = input_image[0,0,:,:,5,i]*std_list[i]+mean_list[i]
-    #npy_input = save_npy(folder2+'input-{}'.format(i+1),recover_input.numpy())
     
     for epoch in range(num_epochs):
         train_setup(model,criterion_name,optimizer_name,input_image[:,:,:,:,:,i],label_image[:,:,:,:,:,i],epoch,i)
-        #recoveredoutput img/npy has been saved
+        #recovered output img/npy has been saved
     
-    #plot loss/psnr/cc and save their npy
+    #loss/psnr/cc: save their npy
     save_npy(folder2+"loss-{}".format(i+1),loss_list)
-    fig1 = plt.figure()
-    ax1 = fig1.add_subplot(111)  
-    plt.plot(loss_list,label='Training loss')
-    plt.title('Time {}:Training Loss'.format(i+1))
-    plt.savefig(folder3+'loss:{}.png'.format(i+1))
-    plt.close(fig1)
-    
-    save_npy(folder2+"psnr-{}".format(i+1),psnr_list)
-    fig2 = plt.figure()
-    ax2 = fig2.add_subplot(111)  
-    plt.plot(psnr_list,label='PSNR')
-    plt.title('Time {}:PSNR'.format(i+1))
-    plt.savefig(folder3+'PSNR:{}.png'.format(i+1))
-    plt.close(fig2)
+    save_npy(folder2+"psnr_nx-{}".format(i+1),psnr_list_nx)
+    save_npy(folder2+"psnr_nnx-{}".format(i+1),psnr_list_nnx)
+    save_npy(folder2+"cc_nx-{}".format(i+1),cc_list_nx)
+    save_npy(folder2+"cc_nnx-{}".format(i+1),cc_list_nnx)
 
-    save_npy(folder2+"cc-{}".format(i+1),cc_list)
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111)  
-    plt.plot(cc_list,label='cc')
-    plt.title('Time {}:Pearson correlation coefficient'.format(i+1))
-    plt.savefig(folder3+'cc:{}.png'.format(i+1))
-    plt.close(fig3)
 
-    #noisy xcat TAC
-    lung = nx[150,130,5,i]
-    lung_list.append(lung)
-
-    #perpect xcat TAC
-    
-    perfect_lung = non_noisy_xcat[150,130,110,i]
-    perfect_lung_list.append(perfect_lung)
-#plot TAC
-for j in number:
-    fig = plt.figure()
-    plt.plot(range(time), perfect_lung_list,label='non-nosiy xcat:TAC in lung')
-    plt.plot(range(time), lung_list,label='noisy xcat:TAC in lung')
-    plt.plot(range(time), lung_big_list[j],label='DIP Denoised:TAC in lung')
-    plt.title('Iter {}00 :TAC in lung'.format(j+1))
-    plt.legend()
-    plt.savefig(folder4+'TAC_lung-{}00.png'.format(j+1))
-    plt.close(fig)#not display the image
     
 
