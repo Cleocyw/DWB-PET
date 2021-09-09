@@ -1,4 +1,5 @@
-## This repository contains the coding files for MSc project: DWB-PET image denoising with CNN.
+## This repository contains the coding files for MSc project: DWB-PET image denoising with CNN. The files are in the branch `master`.
+
 # Structure
 The structure of the repository is as following. Firstly, there are two experiment corresponding to `XCAT` and `Patient`. In each folder, there is a `unet.py` file for a complete denoising process. Folder `Plot` contains the code to plot different figures displayed in my dissertation.
 * XCAT
